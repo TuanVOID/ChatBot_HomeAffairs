@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual env
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data files (too large for git)
+processed/
+indexes/
+logs/
+*.jsonl
+*.parquet
+
+# Environment
+.env
+.server.pid
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Ngrok
+ngrok.exe
+
+# Gemini
+.gemini/
