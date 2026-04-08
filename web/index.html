@@ -4,9 +4,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Legal RAG Chatbot — Tra cứu Pháp luật Việt Nam</title>
+    <title>Trợ lý Pháp luật Nội vụ — Bộ Nội vụ Việt Nam</title>
     <meta name="description"
-        content="Chatbot tra cứu văn bản pháp luật Việt Nam, sử dụng AI và tìm kiếm hybrid BM25 + Vector.">
+        content="AI tra cứu văn bản quy phạm pháp luật chuyên ngành Nội vụ: công chức, viên chức, thi đua khen thưởng, chính quyền địa phương.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
@@ -341,7 +341,7 @@
         }
 
         .msg-bubble p {
-            margin-bottom: 10px;
+            margin-bottom: 0;
         }
 
         .msg-bubble p:last-child {
@@ -362,11 +362,11 @@
         .msg-bubble ul,
         .msg-bubble ol {
             padding-left: 20px;
-            margin: 8px 0;
+            margin: 0;
         }
 
         .msg-bubble li {
-            margin-bottom: 4px;
+            margin-bottom: 0;
             line-height: 1.6;
         }
 
@@ -635,7 +635,7 @@
         <main class="main-area">
             <header class="main-header">
                 <div class="header-title">
-                    <h1>⚖️ Legal RAG Chatbot</h1>
+                    <h1>🏛️ Trợ lý Pháp luật Nội vụ</h1>
                     <span class="header-badge" id="modeBadge">...</span>
                 </div>
                 <div class="header-info" id="headerInfo"></div>
@@ -644,19 +644,24 @@
             <div class="chat-area" id="chatArea">
                 <div class="chat-container" id="chatContainer">
                     <div class="welcome-screen" id="welcomeScreen">
-                        <div class="welcome-icon">⚖️</div>
-                        <h2>Tra cứu Pháp luật Việt Nam</h2>
-                        <p>Hỏi bất kỳ câu hỏi nào về pháp luật Việt Nam. Hệ thống sẽ tìm kiếm trong hàng trăm nghìn văn
-                            bản và trả lời kèm trích dẫn nguồn.</p>
+                        <div class="welcome-icon">🏛️</div>
+                        <h2>Trợ lý Pháp luật Nội vụ</h2>
+                        <p>Hệ thống tra cứu chuyên ngành các văn bản quy phạm pháp luật thuộc lĩnh vực Bộ Nội vụ: công
+                            chức, viên chức, thi đua khen thưởng, chính quyền địa phương, tôn giáo và nhiều lĩnh vực
+                            khác.</p>
                         <div class="example-queries">
-                            <div class="example-query" onclick="sendExample(this)">Quyền sử dụng đất theo Luật Đất đai
-                                được quy định như thế nào?</div>
-                            <div class="example-query" onclick="sendExample(this)">Mức xử phạt vi phạm hành chính về
-                                thuế thu nhập cá nhân?</div>
-                            <div class="example-query" onclick="sendExample(this)">Bảo hiểm xã hội bắt buộc áp dụng cho
-                                đối tượng nào?</div>
-                            <div class="example-query" onclick="sendExample(this)">Thẩm quyền của Hội đồng nhân dân cấp
-                                tỉnh?</div>
+                            <div class="example-query" onclick="sendExample(this)">Điều kiện tuyển dụng công chức theo
+                                Luật Cán bộ, công chức?</div>
+                            <div class="example-query" onclick="sendExample(this)">Quy định về kỷ luật viên chức hiện
+                                hành?</div>
+                            <div class="example-query" onclick="sendExample(this)">Mức lương cơ sở mới nhất áp dụng cho
+                                cán bộ, công chức?</div>
+                            <div class="example-query" onclick="sendExample(this)">Thủ tục sáp nhập đơn vị hành chính
+                                cấp xã?</div>
+                            <div class="example-query" onclick="sendExample(this)">Quy trình xét thi đua, khen thưởng
+                                Huân chương Lao động?</div>
+                            <div class="example-query" onclick="sendExample(this)">Điều kiện thành lập tổ chức tôn giáo
+                                theo Luật Tín ngưỡng?</div>
                         </div>
                     </div>
                 </div>
@@ -665,7 +670,7 @@
             <div class="input-area">
                 <div class="input-container">
                     <div class="input-wrapper">
-                        <textarea id="chatInput" rows="1" placeholder="Hỏi về pháp luật Việt Nam..."
+                        <textarea id="chatInput" rows="1" placeholder="Hỏi về pháp luật ngành Nội vụ..."
                             autocomplete="off"></textarea>
                         <button class="send-btn" id="sendBtn" onclick="sendMessage()" disabled>
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -674,7 +679,8 @@
                             </svg>
                         </button>
                     </div>
-                    <div class="input-hint">⚠️ Hệ thống hỗ trợ tra cứu, không thay thế tư vấn pháp lý chuyên nghiệp.
+                    <div class="input-hint">⚠️ Hệ thống hỗ trợ tra cứu chuyên ngành Nội vụ — không thay thế tư vấn pháp
+                        lý chuyên nghiệp.
                     </div>
                 </div>
             </div>
@@ -800,7 +806,16 @@
                         try {
                             const event = JSON.parse(jsonStr);
 
-                            if (event.type === 'sources' && event.sources?.length) {
+                            if (event.type === 'enrichment') {
+                                // Hiển thị banner thông báo query đã được thêm dấu
+                                const enrichDiv = document.createElement('div');
+                                enrichDiv.style.cssText = 'background: rgba(99,102,241,0.1); border: 1px solid var(--accent); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 8px; font-size: 13px; color: var(--accent-hover);';
+                                enrichDiv.innerHTML = `✨ Đã tự động thêm dấu: <strong>${escapeHtml(event.original)}</strong> → <strong>${escapeHtml(event.processed)}</strong>`;
+                                const typing = contentEl.querySelector('.typing-indicator');
+                                if (typing) typing.before(enrichDiv);
+                                else contentEl.prepend(enrichDiv);
+                                scrollToBottom();
+                            } else if (event.type === 'sources' && event.sources?.length) {
                                 sourcesHtml = buildSourcesHtml(event.sources, event.retrieval_ms);
                                 // Hiển thị sources NGAY dưới typing indicator
                                 const typing = contentEl.querySelector('.typing-indicator');
@@ -933,7 +948,13 @@
         // ── Simple Markdown → HTML ──
         function markdownToHtml(md) {
             if (!md) return '';
-            let html = escapeHtml(md);
+            // Chuẩn hóa: giữ xuống dòng, chỉ bỏ dòng trống thừa.
+            const normalizedMd = md
+                .replace(/\r\n/g, '\n')
+                .replace(/\n{2,}/g, '\n')
+                .trim();
+
+            let html = escapeHtml(normalizedMd);
 
             // Bold
             html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
@@ -948,17 +969,14 @@
             html = html.replace(/(<li>.+<\/li>\n?)+/g, '<ul>$&</ul>');
             // Ordered list
             html = html.replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>');
-            // Paragraphs
-            html = html.replace(/\n\n/g, '</p><p>');
+            // Hiển thị xuống dòng liên tiếp (không có dòng trống)
             html = html.replace(/\n/g, '<br>');
-            html = '<p>' + html + '</p>';
-            // Clean up
-            html = html.replace(/<p><\/p>/g, '');
-            html = html.replace(/<p>(<ul>)/g, '$1');
-            html = html.replace(/(<\/ul>)<\/p>/g, '$1');
-            html = html.replace(/<p>(<blockquote>)/g, '$1');
-            html = html.replace(/(<\/blockquote>)<\/p>/g, '$1');
-
+            // Dọn <br> thừa quanh các block/list để không bị cách 1 dòng trống.
+            html = html
+                .replace(/<br>\s*(<\/?(?:ul|ol|li|blockquote)>)/g, '$1')
+                .replace(/(<\/(?:ul|ol|blockquote)>)\s*<br>/g, '$1')
+                .replace(/<\/li>\s*<br>\s*<li>/g, '</li><li>')
+                .replace(/(<br>\s*){2,}/g, '<br>');
             return html;
         }
 

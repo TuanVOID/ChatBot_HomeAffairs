@@ -1,0 +1,245 @@
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                           📚 1) DATA SOURCES                                 │
+│                                                                              │
+│  - PDF / DOCX / TXT / HTML / Database / Website / CSV / Parquet              │
+│  - Luật, quy định, handbook, wiki nội bộ, FAQ, email, file nghiệp vụ         │
+└───────────────────────────────────┬──────────────────────────────────────────┘
+                                    │
+                                    │ ingest
+┌───────────────────────────────────▼─────────────────────────────────────────┐
+│                     🧹 2) INGESTION + NORMALIZATION                         │
+│                                                                             │
+│  - Đọc file / parse text                                                    │
+│  - Làm sạch dữ liệu: bỏ ký tự rác, normalize unicode, xuống dòng, encoding  │
+│  - Tách metadata: title, source, doc_id, page, section, ngày cập nhật       │
+│  - Chuẩn hóa format chung về JSON / JSONL / records                         │
+└───────────────────────────────────┬──────────────────────────────────────────┘
+                                    │
+                                    │ normalized documents
+┌───────────────────────────────────▼──────────────────────────────────────────┐
+│                          ✂️ 3) CHUNKING LAYER                                │
+│                                                                              │
+│  - Chia văn bản thành các đoạn nhỏ (chunks)                                 │
+│  - Có thể chunk theo: paragraph / heading / semantic / fixed tokens         │
+│  - Có overlap để tránh mất ngữ cảnh                                         │
+│                                                                              │
+│   Ví dụ:                                                                    │
+│   Document → Chunk 001, Chunk 002, Chunk 003...                             │
+│                                                                              │
+│   Mỗi chunk thường có:                                                      │
+│   - chunk_id                                                                 │
+│   - doc_id                                                                   │
+│   - text                                                                     │
+│   - title / section                                                          │
+│   - page / article / clause                                                  │
+│   - source                                                                    │
+└───────────────────────────────────┬──────────────────────────────────────────┘
+                                    │
+                ┌───────────────────┴───────────────────┐
+                │                                       │
+                │                                       │
+┌───────────────▼───────────────┐        ┌──────────────▼─────────────────────┐
+│        🔤 4A) BM25 PATH        │        │         🧠 4B) EMBEDDING PATH      │
+│                                │        │                                    │
+│  Chunk text → tokenizer        │        │  Chunk text → embedding model      │
+│  → inverted index              │        │  → dense vector                    │
+│                                │        │                                    │
+│  Dùng cho keyword / exact      │        │  Dùng cho semantic similarity      │
+│  match / lexical retrieval     │        │  (ý nghĩa gần nhau)                │
+└───────────────┬───────────────┘        └──────────────┬─────────────────────┘
+                │                                       │
+                │                                       │
+┌───────────────▼───────────────┐        ┌──────────────▼─────────────────────┐
+│      🗂️ BM25 INDEX STORE       │        │        🧮 VECTOR INDEX STORE       │
+│                                │        │                                    │
+│  Whoosh / Elasticsearch /      │        │  FAISS / Qdrant / Milvus / Chroma  │
+│  OpenSearch / Lucene           │        │                                    │
+│                                │        │  Lưu vector + mapping về chunk_id  │
+└───────────────┬───────────────┘        └──────────────┬─────────────────────┘
+                │                                       │
+                └───────────────────┬───────────────────┘
+                                    │
+                                    │ cùng tham chiếu về
+┌───────────────────────────────────▼──────────────────────────────────────────┐
+│                         💾 5) METADATA / DOC STORE                           │
+│                                                                              │
+│  - chunk_id -> text gốc                                                      │
+│  - chunk_id -> doc_id                                                        │
+│  - title, source, page, section, url, updated_at                             │
+│  - citation data để show nguồn                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                           👤 6) USER QUERY INPUT                             │
+│                                                                              │
+│  Người dùng nhập câu hỏi ở Web UI / Chat UI                                  │
+│  Ví dụ: "Theo luật, sau ly hôn con ở với ai?"                                │
+└───────────────────────────────────┬──────────────────────────────────────────┘
+                                    │ HTTP / WebSocket
+┌───────────────────────────────────▼──────────────────────────────────────────┐
+│                     🖥️ 7) WEB UI / CHAT FRONTEND                             │
+│                                                                              │
+│  - Ô nhập câu hỏi                                                            │
+│  - Hiển thị câu trả lời                                                      │
+│  - Hiển thị citation / nguồn / đoạn trích                                    │
+│  - Có thể show debug: top-k retrieved chunks                                │
+└───────────────────────────────────┬──────────────────────────────────────────┘
+                                    │
+┌───────────────────────────────────▼──────────────────────────────────────────┐
+│                        🔧 8) API / ORCHESTRATION LAYER                       │
+│                                                                              │
+│  FastAPI / Node / Go / Django                                                │
+│                                                                              │
+│  Chức năng chính:                                                            │
+│  - session management                                                        │
+│  - auth                                                                      │
+│  - query preprocessing                                                       │
+│  - retrieval orchestration                                                   │
+│  - prompt building                                                           │
+│  - response post-processing                                                  │
+│  - citation formatting                                                       │
+│                                                                              │
+│   API ví dụ:                                                                 │
+│   /api/chat                                                                  │
+│   /api/search/debug                                                          │
+│   /api/documents                                                             │
+│   /api/health                                                                │
+└───────────────────────────────────┬──────────────────────────────────────────┘
+                                    │
+                                    │ preprocess query
+┌───────────────────────────────────▼──────────────────────────────────────────┐
+│                     🧹 9) QUERY PREPROCESSING / REWRITE                      │
+│                                                                              │
+│  - normalize query                                                           │
+│  - sửa chính tả nhẹ                                                          │
+│  - query expansion / rewrite                                                 │
+│  - detect intent                                                             │
+│  - optional: phân loại câu hỏi                                               │
+│  - optional: lọc domain / source / time range                                │
+│                                                                              │
+│  Ví dụ:                                                                      │
+│  "ly hôn xong con ở với ai"                                                  │
+│      → "quyền nuôi con sau ly hôn theo luật Việt Nam"                        │
+└───────────────────────────────────┬──────────────────────────────────────────┘
+                                    │
+                ┌───────────────────┴───────────────────┐
+                │                                       │
+                │                                       │
+┌───────────────▼───────────────┐        ┌──────────────▼─────────────────────┐
+│      🔎 10A) BM25 RETRIEVAL    │        │      🔎 10B) VECTOR RETRIEVAL      │
+│                                │        │                                     │
+│  Query text → keyword search   │        │  Query → embedding model            │
+│  trên inverted index           │        │  → query vector                     │
+│                                │        │  → similarity search trên vector DB │
+│  Trả về top-k chunks lexical   │        │  Trả về top-k chunks semantic       │
+│  match                         │        │                                     │
+└───────────────┬───────────────┘        └──────────────┬─────────────────────┘
+                │                                       │
+                │                                       │
+                └───────────────────┬───────────────────┘
+                                    │
+┌───────────────────────────────────▼──────────────────────────────────────────┐
+│                    ⚖️ 11) FUSION / HYBRID MERGING LAYER                      │
+│                                                                              │
+│  Gộp kết quả từ BM25 và Vector Search                                        │
+│                                                                              │
+│  Cách phổ biến:                                                              │
+│  - RRF (Reciprocal Rank Fusion)                                              │
+│  - weighted score fusion                                                     │
+│  - union + deduplicate                                                       │
+│                                                                              │
+│  Mục tiêu:                                                                   │
+│  - vừa bắt được keyword chính xác                                            │
+│  - vừa bắt được ý nghĩa gần đúng                                             │
+└───────────────────────────────────┬──────────────────────────────────────────┘
+                                    │
+                                    │ top candidates
+┌───────────────────────────────────▼──────────────────────────────────────────┐
+│                         🏁 12) RE-RANKING LAYER                              │
+│                                                                              │
+│  Dùng reranker để chấm lại mức liên quan giữa:                               │
+│     (query, chunk)                                                           │
+│                                                                              │
+│  Có thể dùng:                                                                │
+│  - cross-encoder                                                             │
+│  - BGE reranker / Qwen reranker / Jina reranker                              │
+│  - hoặc rule-based nếu MVP                                                   │
+│                                                                              │
+│  Kết quả: lấy ra top-N chunks tốt nhất để nhét vào prompt                   │
+└───────────────────────────────────┬──────────────────────────────────────────┘
+                                    │
+                                    │ selected context
+┌───────────────────────────────────▼──────────────────────────────────────────┐
+│                      📦 13) CONTEXT ASSEMBLY / PACKING                       │
+│                                                                              │
+│  - lấy text chunk gốc từ doc store                                           │
+│  - ghép các chunk theo thứ tự hợp lý                                         │
+│  - cắt bớt để vừa context window                                             │
+│  - giữ metadata cho citation                                                 │
+│  - optional: group theo doc / section                                        │
+│                                                                              │
+│  Tạo context kiểu:                                                           │
+│  [Nguồn 1 - Điều 81] ...                                                     │
+│  [Nguồn 2 - Điều 82] ...                                                     │
+│  [Nguồn 3 - Án lệ / hướng dẫn] ...                                           │
+└───────────────────────────────────┬──────────────────────────────────────────┘
+                                    │
+┌───────────────────────────────────▼──────────────────────────────────────────┐
+│                         🧠 14) PROMPT BUILDER                                │
+│                                                                              │
+│  Tạo prompt hoàn chỉnh cho LLM:                                              │
+│                                                                              │
+│  - system prompt                                                             │
+│  - instruction: chỉ trả lời theo context                                     │
+│  - user query                                                                │
+│  - retrieved context                                                         │
+│  - few-shot examples (nếu có)                                                │
+│  - format yêu cầu: bullet / JSON / markdown / citation                       │
+│                                                                              │
+│  Ví dụ rule:                                                                 │
+│  - nếu không đủ dữ kiện thì nói không tìm thấy                               │
+│  - không bịa                                                                 │
+│  - phải trích nguồn                                                          │
+└───────────────────────────────────┬──────────────────────────────────────────┘
+                                    │ HTTP / local API
+┌───────────────────────────────────▼──────────────────────────────────────────┐
+│                           🤖 15) LLM INFERENCE                               │
+│                                                                              │
+│  Ollama / vLLM / TGI / llama.cpp / OpenAI-compatible server                  │
+│                                                                              │
+│  Model chính:                                                                │
+│  - Qwen2.5-7B-Instruct / Gemma / Llama / Mistral...                          │
+│                                                                              │
+│  LLM nhận:                                                                   │
+│  - câu hỏi                                                                   │
+│  - context đã retrieve                                                       │
+│  - instruction                                                               │
+│                                                                              │
+│  LLM sinh ra:                                                                │
+│  - câu trả lời grounded                                                      │
+│  - có citation                                                               │
+│  - có thể từ chối nếu context không đủ                                       │
+└───────────────────────────────────┬──────────────────────────────────────────┘
+                                    │
+┌───────────────────────────────────▼──────────────────────────────────────────┐
+│                   ✅ 16) POST-PROCESSING / GUARDRAILS                        │
+│                                                                              │
+│  - format lại output                                                         │
+│  - kiểm tra citation                                                         │
+│  - kiểm tra hallucination heuristics                                         │
+│  - chuẩn hóa markdown / JSON                                                 │
+│  - optional: groundedness check                                              │
+│  - optional: answer rewrite cho thân thiện hơn                               │
+└───────────────────────────────────┬──────────────────────────────────────────┘
+                                    │
+┌───────────────────────────────────▼──────────────────────────────────────────┐
+│                        🖥️ 17) RESPONSE TO WEB UI                             │
+│                                                                              │
+│  Hiển thị cho user:                                                          │
+│  - Answer                                                                    │
+│  - Citation / nguồn                                                          │
+│  - optional debug info:                                                      │
+│      top-k chunks, scores, latency, query rewrite                            │
+└──────────────────────────────────────────────────────────────────────────────┘

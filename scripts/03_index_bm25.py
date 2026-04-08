@@ -23,6 +23,7 @@ sys.path.insert(0, str(_ROOT))
 from loguru import logger
 
 from config.settings import cfg
+from src.retrieval.text_tokenizer import tokenize_for_index
 
 # ── Logger setup ──
 logger.remove()
@@ -32,63 +33,26 @@ log_file = cfg.LOG_DIR / "03_index_bm25.log"
 log_file.parent.mkdir(parents=True, exist_ok=True)
 logger.add(str(log_file), level="DEBUG", rotation="10 MB")
 
+from whoosh.analysis import RegexTokenizer, LowercaseFilter
 
-def create_vietnamese_analyzer():
+
+def _tokenize_for_index(text: str) -> str:
     """
-    Tạo analyzer cho tiếng Việt.
-    Thử dùng underthesea word_tokenize, fallback về simple tokenizer.
+    Pre-tokenize tiếng Việt trước khi index.
+    Output dạng "token_1 token_2 ..." để analyzer whitespace xử lý ổn định.
     """
-    try:
-        from underthesea import word_tokenize as vn_tokenize
-        logger.info("Dùng underthesea Vietnamese tokenizer")
-        
-        from whoosh.analysis import Analyzer, Token
-        
-        class VietnameseAnalyzer(Analyzer):
-            """Custom Whoosh analyzer dùng underthesea."""
-            def __call__(self, value, positions=False, chars=False,
-                         keeporiginal=False, removestops=True,
-                         start_pos=0, start_char=0, tokenize=True,
-                         mode='', **kwargs):
-                t = Token(positions, chars, removestops=removestops,
-                          mode=mode)
-                
-                if not value:
-                    return
-                
-                # Tokenize với underthesea
-                try:
-                    words = vn_tokenize(str(value)).split()
-                except Exception:
-                    words = str(value).lower().split()
-                
-                pos = start_pos
-                for word in words:
-                    word = word.lower().strip()
-                    if not word:
-                        continue
-                    t.text = word
-                    t.boost = 1.0
-                    if positions:
-                        t.pos = pos
-                    pos += 1
-                    yield t
-        
-        return VietnameseAnalyzer()
-    
-    except ImportError:
-        logger.warning("underthesea not found, dùng simple tokenizer")
-        from whoosh.analysis import SimpleAnalyzer
-        return SimpleAnalyzer()
+    return tokenize_for_index(text)
 
 
 def build_index(chunks_path: Path, index_dir: Path):
-    """Build Whoosh BM25 index từ chunks.jsonl."""
+    """Build Whoosh BM25 index từ chunks.jsonl (streaming mode)."""
     import whoosh.index as windex
     from whoosh.fields import Schema, TEXT, ID, STORED, KEYWORD
     
-    # Tạo analyzer
-    analyzer = create_vietnamese_analyzer()
+    logger.info("Using internal Unicode tokenizer for BM25 indexing")
+
+    # Dùng analyzer built-in để schema pickle-safe.
+    analyzer = RegexTokenizer(r"\S+") | LowercaseFilter()
     
     # Define schema
     schema = Schema(
@@ -116,44 +80,40 @@ def build_index(chunks_path: Path, index_dir: Path):
     
     ix = windex.create_in(str(index_dir), schema)
     
-    # Load chunks
-    logger.info(f"Loading chunks từ {chunks_path}...")
-    chunks = []
-    with open(chunks_path, "r", encoding="utf-8") as f:
-        for line in f:
-            chunks.append(json.loads(line.strip()))
-    logger.info(f"  Loaded {len(chunks):,} chunks")
-    
-    # Index chunks
-    logger.info("Building BM25 index...")
-    writer = ix.writer(procs=1, limitmb=256)
+    # Streaming: đọc từng dòng, index ngay
+    logger.info(f"Streaming chunks từ {chunks_path}...")
+    writer = ix.writer(procs=1, limitmb=512)
     
     indexed = 0
     errors = 0
     
-    for i, chunk in enumerate(chunks):
-        try:
-            writer.add_document(
-                chunk_id=chunk["chunk_id"],
-                doc_id=chunk["doc_id"],
-                title=chunk.get("title", ""),
-                doc_type=chunk.get("doc_type", ""),
-                issuer=chunk.get("issuer", ""),
-                article=chunk.get("article", ""),
-                clause=chunk.get("clause", ""),
-                path=chunk.get("path", ""),
-                content=chunk.get("text_for_keyword", chunk.get("text", "")),
-            )
-            indexed += 1
-        except Exception as e:
-            errors += 1
-            if errors <= 5:
-                logger.warning(f"  Error indexing {chunk['chunk_id']}: {e}")
-        
-        if (i + 1) % 5000 == 0:
-            logger.info(f"  Indexed {i+1:,}/{len(chunks):,}...")
+    with open(chunks_path, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                chunk = json.loads(line.strip())
+                writer.add_document(
+                    chunk_id=chunk["chunk_id"],
+                    doc_id=chunk["doc_id"],
+                    title=_tokenize_for_index(chunk.get("title", "")),
+                    doc_type=chunk.get("doc_type", ""),
+                    issuer=_tokenize_for_index(chunk.get("issuer", "")),
+                    article=chunk.get("article", ""),
+                    clause=chunk.get("clause", ""),
+                    path=chunk.get("path", ""),
+                    content=_tokenize_for_index(
+                        chunk.get("text_for_keyword", chunk.get("text", ""))
+                    ),
+                )
+                indexed += 1
+            except Exception as e:
+                errors += 1
+                if errors <= 5:
+                    logger.warning(f"  Error indexing: {e}")
+            
+            if indexed % 50000 == 0 and indexed > 0:
+                logger.info(f"  Indexed {indexed:,}...")
     
-    logger.info("Committing index (this may take a moment)...")
+    logger.info(f"Committing index ({indexed:,} docs, this may take a moment)...")
     writer.commit()
     
     logger.info(f"  Indexed: {indexed:,}, Errors: {errors}")

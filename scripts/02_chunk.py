@@ -300,7 +300,7 @@ def main():
     output_path = cfg.PROCESSED_DIR / "chunks.jsonl"
     
     logger.info("=" * 60)
-    logger.info("PHASE 2: PARSE STRUCTURE & CHUNK")
+    logger.info("PHASE 2: PARSE STRUCTURE & CHUNK (Streaming)")
     logger.info(f"  Input: {input_path}")
     logger.info(f"  Output: {output_path}")
     logger.info(f"  Max chunk tokens: {cfg.MAX_CHUNK_TOKENS}")
@@ -313,85 +313,112 @@ def main():
         logger.error("Hãy chạy Phase 1 trước: python scripts/01_ingest.py")
         sys.exit(1)
     
-    # ── Step 1: Đọc documents ──
-    logger.info("Step 1: Loading documents...")
-    documents = []
-    with open(input_path, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if args.limit and i >= args.limit:
-                break
-            documents.append(json.loads(line.strip()))
-    logger.info(f"  Loaded {len(documents):,} documents")
+    # ── Streaming mode: đọc-chunk-ghi từng doc ──
+    logger.info("Streaming: read → chunk → write (từng doc, không load hết RAM)")
     
-    # ── Step 2: Chunk từng document ──
-    logger.info("Step 2: Chunking documents...")
-    all_chunks = []
+    total_docs = 0
+    total_chunks = 0
     docs_with_articles = 0
     docs_fallback = 0
+    chunk_id_collisions_resolved = 0
+    token_sum = 0
+    token_min = float('inf')
+    token_max = 0
+    buckets = {"< 50": 0, "50-200": 0, "200-500": 0, "500-1024": 0, "> 1024": 0}
+    seen_chunk_ids = set()
     
-    for i, doc in enumerate(documents):
-        chunks = chunk_document(doc)
-        
-        # Track article-based vs fallback
-        has_articles = any(c.get("article", "") for c in chunks)
-        if has_articles:
-            docs_with_articles += 1
-        elif chunks:
-            docs_fallback += 1
-        
-        all_chunks.extend(chunks)
-        
-        if (i + 1) % cfg.BATCH_LOG_INTERVAL == 0 or (i + 1) == len(documents):
-            logger.info(
-                f"  Processed {i+1:,}/{len(documents):,} docs "
-                f"→ {len(all_chunks):,} chunks"
-            )
+    log_interval = 10_000
     
-    if not all_chunks:
+    with open(input_path, "r", encoding="utf-8") as fin, \
+         open(output_path, "w", encoding="utf-8") as fout:
+        
+        for i, line in enumerate(fin):
+            if args.limit and i >= args.limit:
+                break
+            
+            try:
+                doc = json.loads(line.strip())
+            except json.JSONDecodeError:
+                continue
+            
+            chunks = chunk_document(doc)
+            total_docs += 1
+            
+            # Track article-based vs fallback
+            has_articles = any(c.get("article", "") for c in chunks)
+            if has_articles:
+                docs_with_articles += 1
+            elif chunks:
+                docs_fallback += 1
+            
+            # Write chunks immediately
+            for chunk in chunks:
+                # Đảm bảo chunk_id unique trên toàn bộ corpus.
+                original_cid = chunk["chunk_id"]
+                cid = original_cid
+                if cid in seen_chunk_ids:
+                    suffix = 2
+                    while f"{original_cid}_dup{suffix}" in seen_chunk_ids:
+                        suffix += 1
+                    cid = f"{original_cid}_dup{suffix}"
+                    chunk["chunk_id"] = cid
+                    chunk_id_collisions_resolved += 1
+                    if chunk_id_collisions_resolved <= 10:
+                        logger.warning(
+                            f"Chunk ID collision: {original_cid} → {cid}"
+                        )
+
+                seen_chunk_ids.add(cid)
+                fout.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+                total_chunks += 1
+                
+                tc = chunk["token_count"]
+                token_sum += tc
+                token_min = min(token_min, tc)
+                token_max = max(token_max, tc)
+                
+                if tc < 50: buckets["< 50"] += 1
+                elif tc < 200: buckets["50-200"] += 1
+                elif tc < 500: buckets["200-500"] += 1
+                elif tc < 1024: buckets["500-1024"] += 1
+                else: buckets["> 1024"] += 1
+            
+            if (total_docs) % log_interval == 0:
+                logger.info(
+                    f"  Processed {total_docs:,} docs → {total_chunks:,} chunks"
+                )
+    
+    if total_chunks == 0:
         logger.error("Không tạo được chunk nào!")
         sys.exit(1)
     
-    # ── Step 3: Stats ──
-    token_counts = [c["token_count"] for c in all_chunks]
-    avg_tokens = sum(token_counts) / len(token_counts)
-    
-    # Token distribution
-    buckets = {
-        "< 50": sum(1 for t in token_counts if t < 50),
-        "50-200": sum(1 for t in token_counts if 50 <= t < 200),
-        "200-500": sum(1 for t in token_counts if 200 <= t < 500),
-        "500-1024": sum(1 for t in token_counts if 500 <= t < 1024),
-        "> 1024": sum(1 for t in token_counts if t >= 1024),
-    }
+    # ── Stats ──
+    avg_tokens = token_sum / total_chunks if total_chunks > 0 else 0
     
     logger.info(f"\n  📊 Chunk Statistics:")
-    logger.info(f"    Total chunks: {len(all_chunks):,}")
+    logger.info(f"    Total docs processed: {total_docs:,}")
+    logger.info(f"    Total chunks: {total_chunks:,}")
     logger.info(f"    Avg tokens/chunk: {avg_tokens:.0f}")
-    logger.info(f"    Min tokens: {min(token_counts)}")
-    logger.info(f"    Max tokens: {max(token_counts)}")
-    logger.info(f"    Docs with articles: {docs_with_articles}")
-    logger.info(f"    Docs fallback (sliding window): {docs_fallback}")
+    logger.info(f"    Min tokens: {token_min}")
+    logger.info(f"    Max tokens: {token_max}")
+    logger.info(f"    Docs with articles: {docs_with_articles:,}")
+    logger.info(f"    Docs fallback (sliding window): {docs_fallback:,}")
+    logger.info(f"    Chunk ID collisions resolved: {chunk_id_collisions_resolved:,}")
     logger.info(f"    Token distribution: {buckets}")
-    
-    # ── Step 4: Save ──
-    logger.info("Step 3: Saving chunks.jsonl...")
-    with open(output_path, "w", encoding="utf-8") as f:
-        for chunk in all_chunks:
-            f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
-    logger.info(f"  Saved {len(all_chunks):,} chunks → {output_path}")
     
     # Update manifest
     elapsed = time.time() - t_start
     manifest = {
         "phase": "02_chunk",
         "input": str(input_path),
-        "total_documents": len(documents),
-        "total_chunks": len(all_chunks),
+        "total_documents": total_docs,
+        "total_chunks": total_chunks,
         "avg_tokens_per_chunk": round(avg_tokens),
-        "min_tokens": min(token_counts),
-        "max_tokens": max(token_counts),
+        "min_tokens": token_min,
+        "max_tokens": token_max,
         "docs_with_articles": docs_with_articles,
         "docs_fallback": docs_fallback,
+        "chunk_id_collisions_resolved": chunk_id_collisions_resolved,
         "token_distribution": buckets,
         "max_chunk_tokens": cfg.MAX_CHUNK_TOKENS,
         "min_chunk_tokens": cfg.MIN_CHUNK_TOKENS,
@@ -402,7 +429,7 @@ def main():
         json.dump(manifest, f, ensure_ascii=False, indent=2)
     
     logger.info("=" * 60)
-    logger.info(f"✅ PHASE 2 COMPLETE — {len(all_chunks):,} chunks in {elapsed:.1f}s")
+    logger.info(f"✅ PHASE 2 COMPLETE — {total_chunks:,} chunks in {elapsed:.1f}s")
     logger.info("=" * 60)
 
 

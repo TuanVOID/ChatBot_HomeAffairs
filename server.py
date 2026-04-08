@@ -31,7 +31,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from config.settings import cfg
-from src.llm.prompt_builder import build_rag_prompt, build_search_summary
+from src.llm.prompt_builder import build_rag_prompt, build_search_summary, GREETING_SUGGESTIONS
 
 # ── Logger ──
 logger.remove()
@@ -42,7 +42,7 @@ log_file.parent.mkdir(parents=True, exist_ok=True)
 logger.add(str(log_file), level="DEBUG", rotation="10 MB")
 
 # ── FastAPI App ──
-app = FastAPI(title="Legal RAG Chatbot", version="1.0.0")
+app = FastAPI(title="Trợ lý Pháp luật Nội vụ", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -54,12 +54,13 @@ app.add_middleware(
 
 # ── Global state ──
 _retriever = None
+_query_preprocessor = None
 _chat_sessions: dict[str, list] = {}  # session_id → history
 
 
 def _init_retriever():
-    """Khởi tạo retrieval engine."""
-    global _retriever
+    """Khởi tạo retrieval engine + query preprocessor."""
+    global _retriever, _query_preprocessor
     try:
         from src.retrieval.hybrid import HybridRetriever
         _retriever = HybridRetriever(
@@ -74,6 +75,16 @@ def _init_retriever():
     except Exception as e:
         logger.error(f"Retriever init failed: {e}")
         _retriever = None
+
+    try:
+        from src.llm.query_preprocessor import QueryPreprocessor
+        _query_preprocessor = QueryPreprocessor(
+            ollama_url=cfg.OLLAMA_BASE_URL,
+            chat_model=cfg.CHAT_MODEL,
+        )
+    except Exception as e:
+        logger.warning(f"QueryPreprocessor init failed: {e}")
+        _query_preprocessor = None
 
 
 # ── API Routes ──
@@ -105,6 +116,12 @@ async def health_check():
         "chat_model": cfg.CHAT_MODEL,
         "embedding_model": cfg.EMBEDDING_MODEL,
     }
+
+
+@app.get("/api/suggestions")
+async def get_suggestions():
+    """Câu hỏi gợi ý cho Nội vụ."""
+    return {"suggestions": GREETING_SUGGESTIONS}
 
 
 @app.post("/api/search")
@@ -154,13 +171,30 @@ async def chat_endpoint(request: Request):
     history = _chat_sessions[session_id]
 
     async def event_generator():
+        nonlocal query
         try:
+            # Step 0: Preprocess query (thêm dấu, detect ngôn ngữ)
+            search_query = query
+            if _query_preprocessor:
+                pp = _query_preprocessor.process(query)
+
+                # Gửi enrichment info về UI
+                if pp["enriched"]:
+                    yield f"data: {json.dumps({'type': 'enrichment', 'original': pp['original'], 'processed': pp['processed'], 'lang': pp['lang']}, ensure_ascii=False)}\n\n"
+                    search_query = pp["processed"]
+
+                # Nếu rejected (tiếng Anh, empty) → trả thông báo
+                if pp["rejected"]:
+                    yield f"data: {json.dumps({'type': 'token', 'content': pp['reject_message']}, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    return
+
             # Step 1: Retrieve context
             contexts = []
             if _retriever:
                 t0 = time.time()
                 contexts = _retriever.search(
-                    query, cfg.BM25_TOP_K, cfg.VECTOR_TOP_K, cfg.HYBRID_TOP_K
+                    search_query, cfg.BM25_TOP_K, cfg.VECTOR_TOP_K, cfg.HYBRID_TOP_K
                 )
                 retrieval_ms = round((time.time() - t0) * 1000)
 
@@ -171,7 +205,7 @@ async def chat_endpoint(request: Request):
                 yield f"data: {json.dumps({'type': 'sources', 'sources': [], 'retrieval_ms': 0}, ensure_ascii=False)}\n\n"
 
             # Step 2: Build prompt
-            messages = build_rag_prompt(query, contexts, history)
+            messages = build_rag_prompt(search_query, contexts, history)
 
             # Step 3: Stream from Ollama
             full_response = ""

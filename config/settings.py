@@ -25,7 +25,7 @@ class _Settings:
 
     # Output paths
     PROCESSED_DIR: Path = _PROJECT_ROOT / os.getenv("PROCESSED_DIR", "processed")
-    INDEX_DIR: Path = _PROJECT_ROOT / os.getenv("INDEX_DIR", "indexes")
+    INDEX_DIR: Path = Path(os.getenv("INDEX_DIR", "G:/ChatBot_indexes"))
     BM25_INDEX_DIR: Path = INDEX_DIR / "bm25"
     VECTOR_INDEX_DIR: Path = INDEX_DIR / "vector"
     LOG_DIR: Path = _PROJECT_ROOT / "logs"
@@ -45,8 +45,8 @@ class _Settings:
     OVERLAP_TOKENS: int = 64              # Context overlap
 
     # -- Retrieval --
-    BM25_TOP_K: int = 20
-    VECTOR_TOP_K: int = 20
+    BM25_TOP_K: int = 80
+    VECTOR_TOP_K: int = 30
     HYBRID_TOP_K: int = 10
     RRF_K: int = 60                       # RRF constant
 

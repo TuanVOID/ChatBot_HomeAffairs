@@ -311,9 +311,9 @@ def main():
     if not args.skip_test and chunks:
         logger.info("\n  🔍 Test vector search:")
         test_queries = [
-            "quyền sử dụng đất",
-            "thuế thu nhập",
-            "xử phạt hành chính",
+            "công chức viên chức",
+            "thi đua khen thưởng",
+            "chính quyền địa phương",
         ]
         for q in test_queries:
             try:

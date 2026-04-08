@@ -24,6 +24,8 @@ indexes/
 logs/
 *.jsonl
 *.parquet
+models/
+data/
 
 # Environment
 .env
