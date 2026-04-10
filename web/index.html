@@ -387,6 +387,33 @@
             color: var(--text-secondary);
         }
 
+        .prompt-debug-box {
+            margin-top: 12px;
+            padding: 10px 12px;
+            border: 1px dashed var(--source-border);
+            border-radius: var(--radius-sm);
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .prompt-debug-title {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            font-weight: 600;
+        }
+
+        .prompt-debug-text {
+            margin: 0;
+            font-size: 12px;
+            line-height: 1.5;
+            color: rgba(232, 232, 237, 0.58);
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-family: 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+        }
+
         /* Sources */
         .sources-container {
             margin-top: 12px;
@@ -770,7 +797,10 @@
 
             // Add bot placeholder with typing
             const botMsgEl = appendMessage('bot', '', true);
-            const contentEl = botMsgEl.querySelector('.msg-bubble');
+            const answerEl = botMsgEl.querySelector('.answer-content');
+            const sourcesHostEl = botMsgEl.querySelector('.sources-host');
+            const promptBoxEl = botMsgEl.querySelector('.prompt-debug-box');
+            const promptTextEl = botMsgEl.querySelector('.prompt-debug-text');
 
             try {
                 const response = await fetch('/api/chat', {
@@ -811,43 +841,40 @@
                                 const enrichDiv = document.createElement('div');
                                 enrichDiv.style.cssText = 'background: rgba(99,102,241,0.1); border: 1px solid var(--accent); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 8px; font-size: 13px; color: var(--accent-hover);';
                                 enrichDiv.innerHTML = `✨ Đã tự động thêm dấu: <strong>${escapeHtml(event.original)}</strong> → <strong>${escapeHtml(event.processed)}</strong>`;
-                                const typing = contentEl.querySelector('.typing-indicator');
+                                const typing = answerEl.querySelector('.typing-indicator');
                                 if (typing) typing.before(enrichDiv);
-                                else contentEl.prepend(enrichDiv);
+                                else answerEl.prepend(enrichDiv);
+                                scrollToBottom();
+                            } else if (event.type === 'prompt_debug' && event.content) {
+                                promptTextEl.textContent = event.content;
+                                promptBoxEl.style.display = 'block';
                                 scrollToBottom();
                             } else if (event.type === 'sources' && event.sources?.length) {
                                 sourcesHtml = buildSourcesHtml(event.sources, event.retrieval_ms);
-                                // Hiển thị sources NGAY dưới typing indicator
-                                const typing = contentEl.querySelector('.typing-indicator');
-                                if (typing) {
-                                    typing.insertAdjacentHTML('afterend', sourcesHtml);
-                                }
+                                sourcesHostEl.innerHTML = sourcesHtml;
                             } else if (event.type === 'token') {
                                 gotAnyToken = true;
                                 // Remove typing indicator on first token
-                                const typing = contentEl.querySelector('.typing-indicator');
+                                const typing = answerEl.querySelector('.typing-indicator');
                                 if (typing) typing.remove();
-                                // Remove sources đã hiện trước đó (sẽ append lại sau)
-                                const oldSources = contentEl.querySelector('.sources-container');
-                                if (oldSources) oldSources.remove();
 
                                 fullText += event.content;
-                                contentEl.innerHTML = markdownToHtml(fullText);
+                                answerEl.innerHTML = markdownToHtml(fullText);
                                 scrollToBottom();
                             } else if (event.type === 'done') {
                                 // Append sources sau nội dung
                                 if (sourcesHtml && gotAnyToken) {
-                                    contentEl.innerHTML += sourcesHtml;
+                                    sourcesHostEl.innerHTML = sourcesHtml;
                                 }
                             } else if (event.type === 'error') {
                                 gotError = true;
                                 // Xóa typing indicator
-                                const typing = contentEl.querySelector('.typing-indicator');
+                                const typing = answerEl.querySelector('.typing-indicator');
                                 if (typing) typing.remove();
-                                // Giữ sources nếu có, thêm error message
-                                const existingSources = contentEl.querySelector('.sources-container');
-                                const sourcesBackup = existingSources ? existingSources.outerHTML : sourcesHtml;
-                                contentEl.innerHTML = `<p style="color: var(--error);">❌ ${event.message}</p>${sourcesBackup}`;
+                                answerEl.innerHTML = `<p style="color: var(--error);">❌ ${event.message}</p>`;
+                                if (sourcesHtml) {
+                                    sourcesHostEl.innerHTML = sourcesHtml;
+                                }
                             }
                         } catch (e) {
                             // Ignore parse errors
@@ -857,14 +884,15 @@
 
                 // Fallback: nếu stream kết thúc mà không có token & không có error
                 if (!gotAnyToken && !gotError) {
-                    const typing = contentEl.querySelector('.typing-indicator');
+                    const typing = answerEl.querySelector('.typing-indicator');
                     if (typing) typing.remove();
-                    const existingSources = contentEl.querySelector('.sources-container');
-                    const sourcesBackup = existingSources ? existingSources.outerHTML : sourcesHtml;
-                    contentEl.innerHTML = `<p style="color: var(--warning);">⚠️ Ollama chưa chạy hoặc model chưa sẵn sàng. Hãy chạy: <code>ollama serve</code></p>${sourcesBackup}`;
+                    answerEl.innerHTML = `<p style="color: var(--warning);">⚠️ Ollama chưa chạy hoặc model chưa sẵn sàng. Hãy chạy: <code>ollama serve</code></p>`;
+                    if (sourcesHtml) {
+                        sourcesHostEl.innerHTML = sourcesHtml;
+                    }
                 }
             } catch (e) {
-                contentEl.innerHTML = `<p style="color: var(--error);">❌ Không thể kết nối server: ${e.message}</p>`;
+                answerEl.innerHTML = `<p style="color: var(--error);">❌ Không thể kết nối server: ${e.message}</p>`;
             }
 
             state.isStreaming = false;
@@ -884,7 +912,14 @@
                     <div class="bot-avatar">⚖️</div>
                     <div class="msg-content">
                         <div class="msg-bubble">
-                            ${isPlaceholder ? '<div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>' : markdownToHtml(content)}
+                            <div class="answer-content">
+                                ${isPlaceholder ? '<div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>' : markdownToHtml(content)}
+                            </div>
+                            <div class="sources-host"></div>
+                            <div class="prompt-debug-box" style="display:none;">
+                                <div class="prompt-debug-title">Input gui AI</div>
+                                <pre class="prompt-debug-text"></pre>
+                            </div>
                         </div>
                     </div>
                 `;

@@ -58,6 +58,16 @@ _query_preprocessor = None
 _chat_sessions: dict[str, list] = {}  # session_id → history
 
 
+def _serialize_messages_for_debug(messages: list[dict]) -> str:
+    """Format toàn bộ chat messages để hiển thị debug trên UI."""
+    blocks = []
+    for idx, msg in enumerate(messages, 1):
+        role = (msg.get("role") or "unknown").upper()
+        content = (msg.get("content") or "").strip()
+        blocks.append(f"[{idx}] {role}\n{content}")
+    return "\n\n".join(blocks)
+
+
 def _init_retriever():
     """Khởi tạo retrieval engine + query preprocessor."""
     global _retriever, _query_preprocessor
@@ -206,6 +216,8 @@ async def chat_endpoint(request: Request):
 
             # Step 2: Build prompt
             messages = build_rag_prompt(search_query, contexts, history)
+            prompt_debug_text = _serialize_messages_for_debug(messages)
+            yield f"data: {json.dumps({'type': 'prompt_debug', 'content': prompt_debug_text}, ensure_ascii=False)}\n\n"
 
             # Step 3: Stream from Ollama
             full_response = ""
