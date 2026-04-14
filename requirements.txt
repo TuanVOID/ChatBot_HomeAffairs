@@ -32,3 +32,6 @@ scikit-learn>=1.4.0
 
 # --- Logging ---
 loguru>=0.7.0
+
+# --- Crawling (Camoufox) ---
+camoufox[geoip]>=0.4.11
