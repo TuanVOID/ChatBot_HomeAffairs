@@ -40,3 +40,15 @@ ngrok.exe
 
 # Gemini
 .gemini/
+
+# Local agent memory
+.brain/
+
+# Crawl runtime artifacts
+scripts/CrawlData/logs/
+scripts/CrawlData/output/
+scripts/CrawlData/state/
+scripts/CrawlData/*crawl_state*.json
+scripts/CrawlData/visited.json
+scripts/CrawlData/captcha_*.png
+scripts/CrawlData/W6
