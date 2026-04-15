@@ -427,6 +427,8 @@ class TVPLCamoufoxCrawler:
         profile_dir: Path,
         output_dir: Path,
         headless: bool,
+        viewport_width: int,
+        viewport_height: int,
         single_page: int | None,
         cf_auto_attempts: int,
         cf_manual_wait: int,
@@ -442,6 +444,8 @@ class TVPLCamoufoxCrawler:
         self.profile_dir = profile_dir
         self.output_dir = output_dir
         self.headless = headless
+        self.viewport_width = max(800, int(viewport_width))
+        self.viewport_height = max(600, int(viewport_height))
         self.single_page = single_page
         self.cf_auto_attempts = max(1, int(cf_auto_attempts))
         self.cf_manual_wait = max(0, int(cf_manual_wait))
@@ -572,10 +576,42 @@ class TVPLCamoufoxCrawler:
         except Exception:
             pass
         try:
-            await self.page.set_viewport_size({"width": 1366, "height": 900})
+            await self.page.set_viewport_size({"width": self.viewport_width, "height": self.viewport_height})
         except Exception:
             pass
         return self.page
+
+    async def _normalize_page_view(self) -> None:
+        """Keep browser/page zoom and horizontal scroll stable across profiles."""
+        await self._ensure_active_page()
+        if not self.page:
+            return
+
+        try:
+            await self.page.keyboard.press("Control+0")
+        except Exception:
+            pass
+
+        try:
+            await self.page.evaluate(
+                """
+                () => {
+                    try { window.scrollTo(0, 0); } catch (e) {}
+                    try {
+                        if (document && document.documentElement) {
+                            document.documentElement.scrollLeft = 0;
+                            document.documentElement.scrollTop = 0;
+                        }
+                        if (document && document.body) {
+                            document.body.scrollLeft = 0;
+                            document.body.scrollTop = 0;
+                        }
+                    } catch (e) {}
+                }
+                """
+            )
+        except Exception:
+            pass
 
     async def _close_extra_blank_tabs(self, keep_page: Any | None) -> int:
         if self._browser_obj is None:
@@ -626,13 +662,16 @@ class TVPLCamoufoxCrawler:
         reused_first_tab = False
         closed_tabs = 0
         await self._ensure_active_page()
+        await self._normalize_page_view()
 
         self.logger.info(
-            "[W%s] Camoufox started: profile=%s proxy=%s headless=%s reused_first_tab=%s closed_blank_tabs=%d",
+            "[W%s] Camoufox started: profile=%s proxy=%s headless=%s viewport=%dx%d reused_first_tab=%s closed_blank_tabs=%d",
             self.worker,
             self.profile_dir,
             "on" if proxy_dict else "off",
             self.headless,
+            self.viewport_width,
+            self.viewport_height,
             reused_first_tab,
             closed_tabs,
         )
@@ -928,158 +967,185 @@ class TVPLCamoufoxCrawler:
             if not self.page:
                 return False
 
-            if not await self._is_tvpl_captcha_page():
-                current_url = self.page.url or ""
-                current_norm = normalize_url(current_url)
-
-                if "/van-ban/" in target_url and current_norm != target_norm:
-                    self.logger.info(
-                        "[W%s] Post-captcha redirect to target doc: current=%s target=%s",
-                        self.worker,
-                        current_url,
-                        target_url,
-                    )
-                    self.stats.requests += 1
-                    await self.page.goto(target_url, wait_until="domcontentloaded", timeout=65000)
-                    await self.page.wait_for_timeout(1000)
-                    if await self._is_tvpl_captcha_page():
-                        continue
-                elif "/page/" in target_url and not is_same_listing_target(current_url, target_url):
-                    self.logger.info(
-                        "[W%s] Post-captcha redirect to target listing: current=%s target=%s",
-                        self.worker,
-                        current_url,
-                        target_url,
-                    )
-                    self.stats.requests += 1
-                    await self.page.goto(target_url, wait_until="domcontentloaded", timeout=65000)
-                    await self.page.wait_for_timeout(1000)
-                    if await self._is_tvpl_captcha_page():
-                        continue
-                return True
-
-            if not HAS_OCR:
-                self.logger.warning(
-                    "[W%s] OCR unavailable (Tesseract missing). Waiting manual captcha solve...",
-                    self.worker,
-                )
-                return await self._wait_manual_captcha()
-
-            img, inp, btn = await self._find_captcha_elements()
-            if img is None:
-                self.logger.warning(
-                    "[W%s] Captcha image not found on check page (attempt %d/%d).",
-                    self.worker,
-                    attempt,
-                    self.captcha_retries,
-                )
-                return await self._wait_manual_captcha()
-
             try:
-                png = await img.screenshot()
-                code = ocr_captcha_code(Image.open(io.BytesIO(png)))
-            except Exception:
-                code = None
+                if not await self._is_tvpl_captcha_page():
+                    current_url = self.page.url or ""
+                    current_norm = normalize_url(current_url)
 
-            if not code:
+                    if "/van-ban/" in target_url and current_norm != target_norm:
+                        self.logger.info(
+                            "[W%s] Post-captcha redirect to target doc: current=%s target=%s",
+                            self.worker,
+                            current_url,
+                            target_url,
+                        )
+                        self.stats.requests += 1
+                        await self.page.goto(target_url, wait_until="domcontentloaded", timeout=65000)
+                        await self.page.wait_for_timeout(1000)
+                        if await self._is_tvpl_captcha_page():
+                            continue
+                    elif "/page/" in target_url and not is_same_listing_target(current_url, target_url):
+                        self.logger.info(
+                            "[W%s] Post-captcha redirect to target listing: current=%s target=%s",
+                            self.worker,
+                            current_url,
+                            target_url,
+                        )
+                        self.stats.requests += 1
+                        await self.page.goto(target_url, wait_until="domcontentloaded", timeout=65000)
+                        await self.page.wait_for_timeout(1000)
+                        if await self._is_tvpl_captcha_page():
+                            continue
+                    await self._normalize_page_view()
+                    return True
+
+                if not HAS_OCR:
+                    self.logger.warning(
+                        "[W%s] OCR unavailable (Tesseract missing). Waiting manual captcha solve...",
+                        self.worker,
+                    )
+                    return await self._wait_manual_captcha()
+
+                img, inp, btn = await self._find_captcha_elements()
+                if img is None:
+                    self.logger.warning(
+                        "[W%s] Captcha image not found on check page (attempt %d/%d).",
+                        self.worker,
+                        attempt,
+                        self.captcha_retries,
+                    )
+                    return await self._wait_manual_captcha()
+
+                try:
+                    png = await img.screenshot()
+                    code = ocr_captcha_code(Image.open(io.BytesIO(png)))
+                except Exception:
+                    code = None
+
+                if not code:
+                    self.logger.info(
+                        "[W%s] OCR returned empty (attempt %d/%d), refreshing captcha.",
+                        self.worker,
+                        attempt,
+                        self.captcha_retries,
+                    )
+                    await self.page.wait_for_timeout(900)
+                    if attempt >= self.captcha_retries:
+                        return await self._wait_manual_captcha()
+                    try:
+                        await img.click(timeout=600)
+                    except Exception:
+                        pass
+                    continue
+
+                if inp is None or btn is None:
+                    self.logger.warning(
+                        "[W%s] Captcha input/button not found (attempt %d/%d).",
+                        self.worker,
+                        attempt,
+                        self.captcha_retries,
+                    )
+                    return await self._wait_manual_captcha()
+
+                self.logger.info("[W%s] Captcha OCR attempt %d/%d -> %s", self.worker, attempt, self.captcha_retries, code)
+                try:
+                    await inp.click(timeout=1200)
+                except Exception:
+                    pass
+                try:
+                    await inp.fill("")
+                except Exception:
+                    pass
+                typed_ok = False
+                try:
+                    await inp.type(code, delay=random.randint(55, 120))
+                    val = re.sub(r"\D", "", await inp.input_value())
+                    typed_ok = (val == code) or val.endswith(code)
+                except Exception:
+                    typed_ok = False
+
+                if not typed_ok:
+                    try:
+                        await inp.click(timeout=800)
+                    except Exception:
+                        pass
+                    try:
+                        await inp.fill(code)
+                    except Exception as exc:
+                        self.logger.warning(
+                            "[W%s] Captcha fill fallback failed (attempt %d/%d): %s",
+                            self.worker,
+                            attempt,
+                            self.captcha_retries,
+                            exc,
+                        )
+                        await self.page.wait_for_timeout(900)
+                        continue
+
+                try:
+                    await btn.click(timeout=1200, force=True)
+                except Exception:
+                    try:
+                        await btn.click(timeout=1200)
+                    except Exception:
+                        await self.page.keyboard.press("Enter")
+
+                try:
+                    await self.page.wait_for_load_state("domcontentloaded", timeout=5000)
+                except Exception:
+                    pass
+                await self.page.wait_for_timeout(2200)
+
+                if not await self._is_tvpl_captcha_page():
+                    current_url = self.page.url or ""
+                    current_norm = normalize_url(current_url)
+                    if "/van-ban/" in target_url and current_norm != target_norm:
+                        self.logger.info(
+                            "[W%s] Captcha passed but wrong doc URL, redirecting: current=%s target=%s",
+                            self.worker,
+                            current_url,
+                            target_url,
+                        )
+                        self.stats.requests += 1
+                        await self.page.goto(target_url, wait_until="domcontentloaded", timeout=65000)
+                        await self.page.wait_for_timeout(900)
+                    elif "/page/" in target_url and not is_same_listing_target(current_url, target_url):
+                        self.logger.info(
+                            "[W%s] Captcha passed but wrong listing URL, redirecting: current=%s target=%s",
+                            self.worker,
+                            current_url,
+                            target_url,
+                        )
+                        self.stats.requests += 1
+                        await self.page.goto(target_url, wait_until="domcontentloaded", timeout=65000)
+                        await self.page.wait_for_timeout(900)
+                    await self._normalize_page_view()
+                    return not await self._is_tvpl_captcha_page()
+
                 self.logger.info(
-                    "[W%s] OCR returned empty (attempt %d/%d), refreshing captcha.",
+                    "[W%s] Captcha still not passed after OCR attempt %d/%d.",
                     self.worker,
                     attempt,
                     self.captcha_retries,
                 )
-                await self.page.wait_for_timeout(900)
-                if attempt >= self.captcha_retries:
-                    return await self._wait_manual_captcha()
                 try:
                     await img.click(timeout=600)
                 except Exception:
                     pass
-                continue
-
-            if inp is None or btn is None:
+                await self.page.wait_for_timeout(900)
+            except Exception as exc:
                 self.logger.warning(
-                    "[W%s] Captcha input/button not found (attempt %d/%d).",
+                    "[W%s] Captcha solve exception (attempt %d/%d): %s",
                     self.worker,
                     attempt,
                     self.captcha_retries,
+                    exc,
                 )
-                return await self._wait_manual_captcha()
-
-            self.logger.info("[W%s] Captcha OCR attempt %d/%d -> %s", self.worker, attempt, self.captcha_retries, code)
-            try:
-                await inp.click(timeout=1200)
-            except Exception:
-                pass
-            try:
-                await inp.fill("")
-            except Exception:
-                pass
-            typed_ok = False
-            try:
-                await inp.type(code, delay=random.randint(55, 120))
-                val = re.sub(r"\D", "", await inp.input_value())
-                typed_ok = (val == code) or val.endswith(code)
-            except Exception:
-                typed_ok = False
-
-            if not typed_ok:
                 try:
-                    await inp.click(timeout=800)
+                    await self.page.wait_for_timeout(900)
                 except Exception:
                     pass
-                await inp.fill(code)
-
-            try:
-                await btn.click(timeout=1200, force=True)
-            except Exception:
-                try:
-                    await btn.click(timeout=1200)
-                except Exception:
-                    await self.page.keyboard.press("Enter")
-
-            try:
-                await self.page.wait_for_load_state("domcontentloaded", timeout=5000)
-            except Exception:
-                pass
-            await self.page.wait_for_timeout(2200)
-
-            if not await self._is_tvpl_captcha_page():
-                current_url = self.page.url or ""
-                current_norm = normalize_url(current_url)
-                if "/van-ban/" in target_url and current_norm != target_norm:
-                    self.logger.info(
-                        "[W%s] Captcha passed but wrong doc URL, redirecting: current=%s target=%s",
-                        self.worker,
-                        current_url,
-                        target_url,
-                    )
-                    self.stats.requests += 1
-                    await self.page.goto(target_url, wait_until="domcontentloaded", timeout=65000)
-                    await self.page.wait_for_timeout(900)
-                elif "/page/" in target_url and not is_same_listing_target(current_url, target_url):
-                    self.logger.info(
-                        "[W%s] Captcha passed but wrong listing URL, redirecting: current=%s target=%s",
-                        self.worker,
-                        current_url,
-                        target_url,
-                    )
-                    self.stats.requests += 1
-                    await self.page.goto(target_url, wait_until="domcontentloaded", timeout=65000)
-                    await self.page.wait_for_timeout(900)
-                return not await self._is_tvpl_captcha_page()
-
-            self.logger.info(
-                "[W%s] Captcha still not passed after OCR attempt %d/%d.",
-                self.worker,
-                attempt,
-                self.captcha_retries,
-            )
-            try:
-                await img.click(timeout=600)
-            except Exception:
-                pass
-            await self.page.wait_for_timeout(900)
+                continue
 
         return await self._wait_manual_captcha()
 
@@ -1135,6 +1201,7 @@ class TVPLCamoufoxCrawler:
                 )
 
             await self.page.wait_for_timeout(700)
+            await self._normalize_page_view()
 
             if await self._resolve_interstitials(target_url):
                 return True
@@ -1259,6 +1326,7 @@ class TVPLCamoufoxCrawler:
         *,
         doc_url: str,
         org_id: int,
+        page_num: int,
         output_file: Path,
         seen: set[str],
     ) -> bool:
@@ -1268,16 +1336,59 @@ class TVPLCamoufoxCrawler:
         ok = await self._goto_with_recovery(doc_url, "document")
         if not ok:
             self.logger.warning("[W%s] Skip document after retries: %s", self.worker, doc_url)
+            self.logger.info(
+                "[W%s] DOC_STATUS %s",
+                self.worker,
+                json.dumps(
+                    {
+                        "org": org_id,
+                        "page": page_num,
+                        "url": doc_url,
+                        "status": "failed",
+                        "reason": "navigation",
+                    },
+                    ensure_ascii=False,
+                ),
+            )
             return False
 
         final_url = normalize_url(self.page.url or doc_url)
         if final_url in seen:
+            self.logger.info(
+                "[W%s] DOC_STATUS %s",
+                self.worker,
+                json.dumps(
+                    {
+                        "org": org_id,
+                        "page": page_num,
+                        "url": doc_url,
+                        "final_url": final_url,
+                        "status": "seen",
+                    },
+                    ensure_ascii=False,
+                ),
+            )
             return False
 
         title = await self._extract_first_text(["h1", ".doc-title", ".title", "title"])
         title = title.replace(" - THU VIEN PHAP LUAT", "").replace(" - THƯ VIỆN PHÁP LUẬT", "")
         content = await self._extract_content()
         if not content:
+            self.logger.info(
+                "[W%s] DOC_STATUS %s",
+                self.worker,
+                json.dumps(
+                    {
+                        "org": org_id,
+                        "page": page_num,
+                        "url": doc_url,
+                        "final_url": final_url,
+                        "status": "failed",
+                        "reason": "empty_content",
+                    },
+                    ensure_ascii=False,
+                ),
+            )
             return False
 
         meta = await self._extract_meta()
@@ -1304,6 +1415,20 @@ class TVPLCamoufoxCrawler:
         seen.add(final_url)
         self.stats.items += 1
         self.logger.info("[W%s] wrote #%d org=%d -> %s", self.worker, self.stats.items, org_id, output_file.name)
+        self.logger.info(
+            "[W%s] DOC_STATUS %s",
+            self.worker,
+            json.dumps(
+                {
+                    "org": org_id,
+                    "page": page_num,
+                    "url": doc_url,
+                    "final_url": final_url,
+                    "status": "ok",
+                },
+                ensure_ascii=False,
+            ),
+        )
         return True
 
     async def crawl_listing_page(self, *, org_id: int, start_page: int, end_page: int, page_num: int) -> tuple[int, int]:
@@ -1317,11 +1442,28 @@ class TVPLCamoufoxCrawler:
         ok = await self._goto_with_recovery(url, "listing")
         if not ok:
             self.logger.warning("[W%s] listing failed org=%d page=%d", self.worker, org_id, page_num)
+            self.logger.info(
+                "[W%s] PAGE_LISTING_FAIL %s",
+                self.worker,
+                json.dumps({"org": org_id, "page": page_num}, ensure_ascii=False),
+            )
             return 0, 0
 
         links = await self._collect_listing_links()
         self.stats.listing_pages += 1
         self.stats.links += len(links)
+        self.logger.info(
+            "[W%s] PAGE_MANIFEST %s",
+            self.worker,
+            json.dumps(
+                {
+                    "org": org_id,
+                    "page": page_num,
+                    "links": links,
+                },
+                ensure_ascii=False,
+            ),
+        )
 
         if links:
             self.logger.info("[W%s] org=%d page=%d -> +%d links", self.worker, org_id, page_num, len(links))
@@ -1332,8 +1474,28 @@ class TVPLCamoufoxCrawler:
         written = 0
         for doc_url in links:
             if doc_url in seen:
+                self.logger.info(
+                    "[W%s] DOC_STATUS %s",
+                    self.worker,
+                    json.dumps(
+                        {
+                            "org": org_id,
+                            "page": page_num,
+                            "url": doc_url,
+                            "final_url": doc_url,
+                            "status": "seen",
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
                 continue
-            if await self._crawl_document(doc_url=doc_url, org_id=org_id, output_file=output_file, seen=seen):
+            if await self._crawl_document(
+                doc_url=doc_url,
+                org_id=org_id,
+                page_num=page_num,
+                output_file=output_file,
+                seen=seen,
+            ):
                 written += 1
             await self._sleep_request_delay()
 
@@ -1376,6 +1538,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--proxy", type=str, default="", help="Proxy format supported by parser")
     parser.add_argument("--profile-dir", type=str, default="", help="Persistent profile directory")
     parser.add_argument("--headless", action="store_true", help="Run browser in headless mode")
+    parser.add_argument("--viewport-width", type=int, default=1600, help="Viewport width in pixels")
+    parser.add_argument("--viewport-height", type=int, default=900, help="Viewport height in pixels")
     parser.add_argument("--cf-auto-attempts", type=int, default=3, help="Cloudflare auto attempts")
     parser.add_argument("--cf-manual-wait", type=int, default=30, help="Cloudflare manual wait in seconds")
     parser.add_argument("--captcha-retries", type=int, default=8, help="Captcha OCR retries")
@@ -1428,6 +1592,8 @@ async def async_main(args: argparse.Namespace) -> int:
         profile_dir=profile_dir,
         output_dir=output_dir,
         headless=bool(args.headless),
+        viewport_width=args.viewport_width,
+        viewport_height=args.viewport_height,
         single_page=args.single_page,
         cf_auto_attempts=args.cf_auto_attempts,
         cf_manual_wait=args.cf_manual_wait,
