@@ -1,20 +1,21 @@
 """
 Phase 3a — Build BM25 Keyword Index (Whoosh)
-===============================================
-Đọc chunks.jsonl, tokenize tiếng Việt, build Whoosh BM25 index.
+=============================================
+Hỗ trợ 2 mode:
+- full rebuild (mặc định): xóa index cũ và build lại toàn bộ
+- incremental (--incremental): chỉ add chunk mới chưa có trong index
 
 Usage:
     python scripts/03_index_bm25.py
+    python scripts/03_index_bm25.py --incremental
     python scripts/03_index_bm25.py --input processed/chunks.jsonl
-
-Output:
-    indexes/bm25/   — Whoosh index directory 
 """
 
 import argparse
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -44,8 +45,19 @@ def _tokenize_for_index(text: str) -> str:
     return tokenize_for_index(text)
 
 
-def build_index(chunks_path: Path, index_dir: Path):
-    """Build Whoosh BM25 index từ chunks.jsonl (streaming mode)."""
+def _load_existing_chunk_ids(ix) -> set[str]:
+    """Đọc toàn bộ chunk_id hiện có trong index (dùng cho incremental mode)."""
+    ids = set()
+    with ix.searcher() as s:
+        for fields in s.all_stored_fields():
+            cid = fields.get("chunk_id")
+            if cid:
+                ids.add(cid)
+    return ids
+
+
+def build_index(chunks_path: Path, index_dir: Path, incremental: bool = False):
+    """Build/Update Whoosh BM25 index từ chunks.jsonl (streaming mode)."""
     import whoosh.index as windex
     from whoosh.fields import Schema, TEXT, ID, STORED, KEYWORD
     
@@ -68,31 +80,47 @@ def build_index(chunks_path: Path, index_dir: Path):
         content=TEXT(analyzer=analyzer),
     )
     
-    # Tạo hoặc clear index directory
     index_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Xóa index cũ nếu có
+
     import shutil
-    if index_dir.exists() and any(index_dir.iterdir()):
-        logger.info(f"Xóa index cũ tại {index_dir}")
-        shutil.rmtree(index_dir)
-        index_dir.mkdir(parents=True, exist_ok=True)
-    
-    ix = windex.create_in(str(index_dir), schema)
+    existing_ids: set[str] = set()
+    skipped_existing = 0
+    mode = "full_rebuild"
+
+    if incremental and index_dir.exists() and any(index_dir.iterdir()):
+        logger.info(f"Incremental mode: mở index hiện có tại {index_dir}")
+        ix = windex.open_dir(str(index_dir))
+        existing_ids = _load_existing_chunk_ids(ix)
+        logger.info(f"  Existing chunk_ids: {len(existing_ids):,}")
+        mode = "incremental"
+    else:
+        if index_dir.exists() and any(index_dir.iterdir()):
+            logger.info(f"Xóa index cũ tại {index_dir}")
+            shutil.rmtree(index_dir)
+            index_dir.mkdir(parents=True, exist_ok=True)
+        ix = windex.create_in(str(index_dir), schema)
     
     # Streaming: đọc từng dòng, index ngay
     logger.info(f"Streaming chunks từ {chunks_path}...")
-    writer = ix.writer(procs=1, limitmb=512)
+    writer = ix.writer(procs=1, limitmb=1024)
     
     indexed = 0
     errors = 0
+    total_lines = 0
     
     with open(chunks_path, "r", encoding="utf-8") as f:
         for line in f:
+            total_lines += 1
             try:
                 chunk = json.loads(line.strip())
+                cid = chunk["chunk_id"]
+
+                if cid in existing_ids:
+                    skipped_existing += 1
+                    continue
+
                 writer.add_document(
-                    chunk_id=chunk["chunk_id"],
+                    chunk_id=cid,
                     doc_id=chunk["doc_id"],
                     title=_tokenize_for_index(chunk.get("title", "")),
                     doc_type=chunk.get("doc_type", ""),
@@ -116,9 +144,61 @@ def build_index(chunks_path: Path, index_dir: Path):
     logger.info(f"Committing index ({indexed:,} docs, this may take a moment)...")
     writer.commit()
     
-    logger.info(f"  Indexed: {indexed:,}, Errors: {errors}")
+    logger.info(
+        f"  Mode={mode} | Added={indexed:,} | Skipped(existing)={skipped_existing:,} "
+        f"| Total lines={total_lines:,} | Errors={errors}"
+    )
     
-    return ix, indexed
+    return ix, indexed, skipped_existing, total_lines
+
+
+def write_bm25_config(
+    index_dir: Path,
+    *,
+    input_path: Path,
+    indexed_added: int,
+    skipped_existing: int,
+    total_lines: int,
+    incremental: bool,
+    elapsed_seconds: float,
+):
+    config_path = index_dir / "config.json"
+    previous = {}
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                previous = json.load(f)
+        except Exception:
+            previous = {}
+
+    created_at = previous.get("created_at") or datetime.now(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+    try:
+        import whoosh.index as windex
+
+        ix = windex.open_dir(str(index_dir))
+        total_docs = ix.doc_count()
+    except Exception:
+        total_docs = None
+
+    cfg_data = {
+        "index_type": "whoosh_bm25",
+        "build_mode": "incremental" if incremental else "full_rebuild",
+        "input_chunks_path": str(input_path),
+        "indexed_added": indexed_added,
+        "skipped_existing": skipped_existing,
+        "total_lines_scanned": total_lines,
+        "total_docs_in_index": total_docs,
+        "elapsed_seconds": round(elapsed_seconds, 1),
+        "created_at": created_at,
+        "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "index_version": f"bm25-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}",
+    }
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(cfg_data, f, ensure_ascii=False, indent=2)
+    logger.info(f"Saved BM25 config -> {config_path}")
 
 
 def test_index(index_dir: Path, test_queries: list[str] = None):
@@ -160,6 +240,8 @@ def main():
     parser = argparse.ArgumentParser(description="Phase 3a: Build BM25 Index")
     parser.add_argument("--input", type=str, default=None,
                         help="Path tới chunks.jsonl")
+    parser.add_argument("--incremental", action="store_true",
+                        help="Chỉ add chunk mới chưa có trong index")
     parser.add_argument("--skip-test", action="store_true",
                         help="Bỏ qua test queries")
     args = parser.parse_args()
@@ -174,6 +256,7 @@ def main():
     logger.info("PHASE 3a: BUILD BM25 INDEX (Whoosh)")
     logger.info(f"  Input: {chunks_path}")
     logger.info(f"  Index dir: {index_dir}")
+    logger.info(f"  Mode: {'INCREMENTAL' if args.incremental else 'FULL_REBUILD'}")
     logger.info("=" * 60)
     
     if not chunks_path.exists():
@@ -182,15 +265,29 @@ def main():
         sys.exit(1)
     
     # Build
-    ix, indexed = build_index(chunks_path, index_dir)
+    ix, indexed, skipped_existing, total_lines = build_index(
+        chunks_path, index_dir, incremental=args.incremental
+    )
     
     # Test  
     if not args.skip_test:
         test_index(index_dir)
     
     elapsed = time.time() - t_start
+    write_bm25_config(
+        index_dir,
+        input_path=chunks_path,
+        indexed_added=indexed,
+        skipped_existing=skipped_existing,
+        total_lines=total_lines,
+        incremental=args.incremental,
+        elapsed_seconds=elapsed,
+    )
     logger.info("=" * 60)
-    logger.info(f"✅ PHASE 3a COMPLETE — {indexed:,} chunks indexed in {elapsed:.1f}s")
+    logger.info(
+        f"✅ PHASE 3a COMPLETE — added {indexed:,} chunks "
+        f"(skipped {skipped_existing:,}/{total_lines:,}) in {elapsed:.1f}s"
+    )
     logger.info(f"  Index at: {index_dir}")
     logger.info("=" * 60)
 

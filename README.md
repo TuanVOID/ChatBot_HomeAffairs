@@ -63,6 +63,24 @@ Parquet files (518K docs, ~3.6GB)
   → 04_index_vector.py: embed + build FAISS index
 ```
 
+### Incremental Update (recommended for frequent new docs)
+```bash
+# 1) Re-chunk only data pipeline output you want to update
+python scripts/02_chunk.py --input processed/documents.jsonl
+
+# 2) BM25: add only new chunk_id (no full rebuild)
+python scripts/03_index_bm25.py --incremental
+
+# 3) Vector: add only new chunk_id, parallel embedding workers
+python scripts/04_index_vector.py --incremental --workers 5 --batch-size 128
+```
+
+### Full Rebuild (when changing chunking/embedding model)
+```bash
+python scripts/03_index_bm25.py
+python scripts/04_index_vector.py --workers 5 --batch-size 128
+```
+
 ### 2. Query Flow (Online)
 ```
 User Query

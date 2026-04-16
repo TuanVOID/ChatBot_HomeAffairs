@@ -2,6 +2,8 @@
 Hybrid Retrieval Engine — BM25 + Vector + RRF Fusion.
 """
 
+import re
+import time
 from pathlib import Path
 from loguru import logger
 
@@ -46,35 +48,85 @@ class HybridRetriever:
         2. Vector → top_k results (nếu available)
         3. RRF fusion → final_top_k results
         """
-        # BM25 search
-        bm25_results = self._bm25.search(query, bm25_top_k)
+        snapshot = self.search_with_snapshot(
+            query=query,
+            bm25_top_k=bm25_top_k,
+            vector_top_k=vector_top_k,
+            final_top_k=final_top_k,
+        )
+        return snapshot["final_results"]
 
-        # Vector search (nếu available)
+    def search_with_snapshot(
+        self,
+        query: str,
+        bm25_top_k: int = 20,
+        vector_top_k: int = 20,
+        final_top_k: int = 10,
+    ) -> dict:
+        """
+        Search + trả về đầy đủ snapshot các stage để debug/observability.
+        Không làm thay đổi logic xếp hạng hiện tại.
+        """
+        latencies_ms: dict[str, int] = {}
+
+        t_bm25 = time.perf_counter()
+        bm25_results = self._bm25.search(query, bm25_top_k)
+        latencies_ms["bm25"] = round((time.perf_counter() - t_bm25) * 1000)
+
         vector_results = []
+        t_vector = time.perf_counter()
         if self._vector and self._vector.available:
             try:
                 vector_results = self._vector.search(query, vector_top_k)
             except Exception as e:
                 logger.warning(f"Vector search failed: {e}")
+        latencies_ms["vector"] = round((time.perf_counter() - t_vector) * 1000)
 
-        # RRF Fusion
+        t_rrf = time.perf_counter()
         if vector_results:
             fused = self._rrf_fusion(bm25_results, vector_results)
         else:
-            # BM25 only
-            fused = bm25_results
+            fused = list(bm25_results)
+        latencies_ms["rrf"] = round((time.perf_counter() - t_rrf) * 1000)
 
-        # Dedup by chunk_id
+        t_dedup = time.perf_counter()
         seen = set()
         deduped = []
+        filtered_out = []
         for r in fused:
             cid = r["chunk_id"]
-            if cid not in seen:
-                seen.add(cid)
-                deduped.append(r)
+            if cid in seen:
+                filtered_out.append({
+                    "chunk_id": cid,
+                    "reason": "duplicate_chunk_id",
+                })
+                continue
+            seen.add(cid)
+            deduped.append(r)
+        latencies_ms["dedup"] = round((time.perf_counter() - t_dedup) * 1000)
 
+        t_rerank = time.perf_counter()
         reranked = self._heuristic_rerank(query, deduped)
-        return reranked[:final_top_k]
+        latencies_ms["rerank"] = round((time.perf_counter() - t_rerank) * 1000)
+
+        final_results = reranked[:final_top_k]
+        for cut in reranked[final_top_k:]:
+            filtered_out.append({
+                "chunk_id": cut.get("chunk_id", ""),
+                "reason": "top_k_cutoff",
+                "rank_after_rerank": cut.get("rank"),
+            })
+
+        return {
+            "bm25_hits": bm25_results,
+            "vector_hits": vector_results,
+            "rrf_hits": fused,
+            "deduped_hits": deduped,
+            "reranked_hits": reranked,
+            "final_results": final_results,
+            "filtered_out": filtered_out,
+            "latencies_ms": latencies_ms,
+        }
 
     def _rrf_fusion(self, bm25_results: list[dict],
                     vector_results: list[dict]) -> list[dict]:
@@ -136,6 +188,15 @@ class HybridRetriever:
         asks_conditions = "điều kiện" in query_lower
         asks_recruitment = "tuyển dụng" in query_lower
         asks_base_salary = ("lương cơ sở" in query_lower)
+        asks_exact_quote = ("trích dẫn" in query_lower) and (
+            "chính xác" in query_lower or "nguyên văn" in query_lower
+        )
+
+        refs = self._extract_legal_refs(query)
+        target_doc_number = refs["document_number"]
+        target_doc_short = refs["document_short"]
+        target_article = refs["article_number"]
+        target_chapter = refs["chapter"]
 
         reranked = []
         for original_rank, item in enumerate(candidates):
@@ -161,10 +222,50 @@ class HybridRetriever:
             bonus = 0.0
             doc_id = str(item.get("doc_id", ""))
             clause = str(item.get("clause", "")).strip().lower()
+            item_doc_number = self._normalize_doc_number(item.get("document_number", ""))
+            item_doc_short = self._extract_doc_short(item_doc_number)
+            item_article = self._extract_numeric_ref(item.get("article", ""))
+            item_chapter = self._extract_chapter_ref(item.get("path", ""))
+
+            doc_match = False
+            if target_doc_number:
+                doc_match = item_doc_number == target_doc_number
+            elif target_doc_short:
+                doc_match = item_doc_short == target_doc_short
+
+            article_match = bool(target_article and item_article == target_article)
+            chapter_match = bool(target_chapter and item_chapter == target_chapter)
 
             # Ưu tiên văn bản đúng luật được gọi tên trong query.
             if has_cbcc_phrase and "can-bo-cong-chuc" in doc_id:
                 bonus += 0.018
+
+            # Query chứa số hiệu văn bản/Điều/Chương: ưu tiên đúng target pháp lý.
+            if target_doc_number or target_doc_short:
+                if doc_match:
+                    bonus += 0.042
+                elif item_doc_number:
+                    bonus -= 0.015
+
+            if target_article:
+                if article_match:
+                    bonus += 0.032
+                elif doc_match and item_article:
+                    bonus -= 0.010
+
+            if target_chapter:
+                if chapter_match:
+                    bonus += 0.016
+                elif doc_match and item_chapter:
+                    bonus -= 0.006
+
+            if doc_match and article_match:
+                bonus += 0.055
+                if asks_exact_quote:
+                    bonus += 0.012
+
+            if doc_match and article_match and chapter_match:
+                bonus += 0.030
 
             # Câu hỏi điều kiện tuyển dụng công chức thường cần khoản 1 điều kiện.
             if asks_conditions and asks_recruitment:
@@ -210,6 +311,73 @@ class HybridRetriever:
         for i in range(len(tokens) - 1):
             phrases.add(f"{tokens[i]} {tokens[i + 1]}")
         return phrases
+
+    @staticmethod
+    def _normalize_doc_number(text: str) -> str:
+        normalized = str(text or "").upper().strip()
+        normalized = re.sub(r"\s+", "", normalized)
+        return normalized
+
+    @staticmethod
+    def _extract_doc_short(doc_number: str) -> str:
+        m = re.match(r"^(\d{1,4}/\d{4})", doc_number or "")
+        return m.group(1) if m else ""
+
+    @staticmethod
+    def _extract_numeric_ref(text: str) -> str:
+        m = re.search(r"\b(\d+)\b", str(text or ""))
+        return m.group(1) if m else ""
+
+    @staticmethod
+    def _normalize_chapter_ref(raw: str) -> str:
+        value = str(raw or "").strip().upper()
+        if not value:
+            return ""
+        if value.isdigit():
+            return value
+        if re.fullmatch(r"[IVXLCDM]+", value):
+            return value
+        return ""
+
+    @classmethod
+    def _extract_chapter_ref(cls, text: str) -> str:
+        m = re.search(r"chương\s+([ivxlcdm]+|\d+)", str(text or ""), flags=re.IGNORECASE)
+        if not m:
+            return ""
+        return cls._normalize_chapter_ref(m.group(1))
+
+    @classmethod
+    def _extract_legal_refs(cls, query: str) -> dict:
+        q = str(query or "")
+        q_no_space = re.sub(r"\s+", "", q)
+        q_lower = q.lower()
+
+        doc_number = ""
+        m_doc = re.search(
+            r"(\d{1,4}\s*/\s*\d{4}\s*/\s*[0-9a-zđA-ZĐ-]{2,20})",
+            q,
+            flags=re.IGNORECASE,
+        )
+        if m_doc:
+            doc_number = cls._normalize_doc_number(m_doc.group(1))
+
+        doc_short = ""
+        m_short = re.search(r"(\d{1,4}\s*/\s*\d{4})", q_no_space)
+        if m_short:
+            doc_short = m_short.group(1)
+
+        m_article = re.search(r"\bđiều\s+(\d+)\b", q_lower)
+        article = m_article.group(1) if m_article else ""
+
+        m_chapter = re.search(r"\bchương\s+([ivxlcdm]+|\d+)\b", q_lower)
+        chapter = cls._normalize_chapter_ref(m_chapter.group(1)) if m_chapter else ""
+
+        return {
+            "document_number": doc_number,
+            "document_short": doc_short,
+            "article_number": article,
+            "chapter": chapter,
+        }
 
     @property
     def mode(self) -> str:
