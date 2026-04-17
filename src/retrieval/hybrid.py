@@ -4,6 +4,7 @@ Hybrid Retrieval Engine — BM25 + Vector + RRF Fusion.
 
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from loguru import logger
 
@@ -24,13 +25,17 @@ class HybridRetriever:
 
         self._rrf_k = rrf_k
         self._bm25 = BM25Searcher(bm25_index_dir, chunks_path)
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="retrieval")
 
         self._vector = None
         try:
             if (vector_index_dir / "faiss.index").exists():
                 from src.retrieval.vector_searcher import VectorSearcher
                 self._vector = VectorSearcher(
-                    vector_index_dir, ollama_url, embedding_model
+                    vector_index_dir,
+                    ollama_url,
+                    embedding_model,
+                    chunks_map=self._bm25.chunks_map,
                 )
                 logger.info("HybridRetriever: BM25 + Vector (FULL HYBRID)")
             else:
@@ -64,23 +69,57 @@ class HybridRetriever:
         final_top_k: int = 10,
     ) -> dict:
         """
-        Search + trả về đầy đủ snapshot các stage để debug/observability.
-        Không làm thay đổi logic xếp hạng hiện tại.
+        Search + tr? v? ??y ?? snapshot c?c stage ?? debug/observability.
+        Kh?ng l?m thay ??i logic x?p h?ng hi?n t?i.
         """
         latencies_ms: dict[str, int] = {}
+        t_total = time.perf_counter()
 
-        t_bm25 = time.perf_counter()
-        bm25_results = self._bm25.search(query, bm25_top_k)
-        latencies_ms["bm25"] = round((time.perf_counter() - t_bm25) * 1000)
+        vector_available = bool(self._vector and self._vector.available)
+        executed_parallel = False
 
-        vector_results = []
-        t_vector = time.perf_counter()
-        if self._vector and self._vector.available:
-            try:
-                vector_results = self._vector.search(query, vector_top_k)
-            except Exception as e:
-                logger.warning(f"Vector search failed: {e}")
-        latencies_ms["vector"] = round((time.perf_counter() - t_vector) * 1000)
+        bm25_debug: dict = {}
+        bm25_results: list[dict] = []
+        vector_results: list[dict] = []
+
+        def _run_bm25() -> tuple[list[dict], dict, int]:
+            t0 = time.perf_counter()
+            payload = self._bm25.search(query, bm25_top_k, return_debug=True)
+            elapsed_ms = round((time.perf_counter() - t0) * 1000)
+            if isinstance(payload, dict):
+                return (
+                    list(payload.get("results", [])),
+                    dict(payload.get("debug", {})),
+                    elapsed_ms,
+                )
+            return list(payload or []), {}, elapsed_ms
+
+        def _run_vector() -> tuple[list[dict], int]:
+            t0 = time.perf_counter()
+            rows: list[dict] = []
+            if vector_available:
+                try:
+                    rows = self._vector.search(query, vector_top_k)
+                except Exception as e:
+                    logger.warning(f"Vector search failed: {e}")
+            elapsed_ms = round((time.perf_counter() - t0) * 1000)
+            return rows, elapsed_ms
+
+        if vector_available:
+            executed_parallel = True
+            bm25_future = self._executor.submit(_run_bm25)
+            vector_future = self._executor.submit(_run_vector)
+            bm25_results, bm25_debug, latencies_ms["bm25"] = bm25_future.result()
+            vector_results, latencies_ms["vector"] = vector_future.result()
+        else:
+            bm25_results, bm25_debug, latencies_ms["bm25"] = _run_bm25()
+            latencies_ms["vector"] = 0
+
+        latencies_ms["bm25_open_index"] = int(bm25_debug.get("open_index_ms", 0))
+        latencies_ms["bm25_open_searcher"] = int(bm25_debug.get("open_searcher_ms", 0))
+        latencies_ms["bm25_build_query"] = int(bm25_debug.get("build_query_ms", 0))
+        latencies_ms["bm25_execute_search"] = int(bm25_debug.get("execute_search_ms", 0))
+        latencies_ms["bm25_hydrate_hits"] = int(bm25_debug.get("hydrate_hits_ms", 0))
 
         t_rrf = time.perf_counter()
         if vector_results:
@@ -117,6 +156,8 @@ class HybridRetriever:
                 "rank_after_rerank": cut.get("rank"),
             })
 
+        latencies_ms["total"] = round((time.perf_counter() - t_total) * 1000)
+
         return {
             "bm25_hits": bm25_results,
             "vector_hits": vector_results,
@@ -126,6 +167,11 @@ class HybridRetriever:
             "final_results": final_results,
             "filtered_out": filtered_out,
             "latencies_ms": latencies_ms,
+            "bm25_debug": bm25_debug,
+            "execution": {
+                "parallel": executed_parallel,
+                "vector_available": vector_available,
+            },
         }
 
     def _rrf_fusion(self, bm25_results: list[dict],

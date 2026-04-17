@@ -2,8 +2,11 @@
 Vector Searcher — Semantic search với FAISS + Ollama embedding.
 """
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from loguru import logger
@@ -12,7 +15,13 @@ from loguru import logger
 class VectorSearcher:
     """Wrapper cho FAISS vector index + Ollama embedding."""
 
-    def __init__(self, index_dir: Path, ollama_url: str, model: str):
+    def __init__(
+        self,
+        index_dir: Path,
+        ollama_url: str,
+        model: str,
+        chunks_map: dict[str, dict[str, Any]] | None = None,
+    ):
         import faiss
 
         index_path = index_dir / "faiss.index"
@@ -46,42 +55,50 @@ class VectorSearcher:
         )
 
         # Load full chunks for text return
-        self._chunks_map: dict[str, dict] = {}
-        chunks_path = None
-        candidate_paths: list[Path] = []
-
-        # Ưu tiên path cấu hình project (đúng kể cả khi index đặt ở ổ khác).
-        try:
-            from config.settings import cfg
-            candidate_paths.append(cfg.PROCESSED_DIR / "chunks.jsonl")
-        except Exception:
-            pass
-
-        # Fallback tương thích ngược với layout cũ.
-        candidate_paths.extend([
-            index_dir.parent.parent / "processed" / "chunks.jsonl",
-            index_dir.parent / "processed" / "chunks.jsonl",
-        ])
-
-        for p in candidate_paths:
-            if p.exists():
-                chunks_path = p
-                break
-
-        if chunks_path:
-            with open(chunks_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    c = json.loads(line.strip())
-                    self._chunks_map[c["chunk_id"]] = c
+        self._chunks_map: dict[str, dict[str, Any]] = {}
+        if chunks_map is not None:
+            self._chunks_map = chunks_map
             logger.info(
-                f"VectorSearcher chunks cache loaded: "
-                f"{len(self._chunks_map)} chunks from {chunks_path}"
+                "VectorSearcher using shared chunks cache: {} chunks",
+                len(self._chunks_map),
             )
         else:
-            logger.warning(
-                "VectorSearcher: chunks.jsonl not found, "
-                "search results sẽ thiếu text/document metadata."
-            )
+            chunks_path = None
+            candidate_paths: list[Path] = []
+
+            # Ưu tiên path cấu hình project (đúng kể cả khi index đặt ở ổ khác).
+            try:
+                from config.settings import cfg
+
+                candidate_paths.append(cfg.PROCESSED_DIR / "chunks.jsonl")
+            except Exception:
+                pass
+
+            # Fallback tương thích ngược với layout cũ.
+            candidate_paths.extend([
+                index_dir.parent.parent / "processed" / "chunks.jsonl",
+                index_dir.parent / "processed" / "chunks.jsonl",
+            ])
+
+            for p in candidate_paths:
+                if p.exists():
+                    chunks_path = p
+                    break
+
+            if chunks_path:
+                with open(chunks_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        c = json.loads(line.strip())
+                        self._chunks_map[c["chunk_id"]] = c
+                logger.info(
+                    f"VectorSearcher chunks cache loaded: "
+                    f"{len(self._chunks_map)} chunks from {chunks_path}"
+                )
+            else:
+                logger.warning(
+                    "VectorSearcher: chunks.jsonl not found, "
+                    "search results sẽ thiếu text/document metadata."
+                )
 
     def _embed(self, texts: list[str]) -> np.ndarray:
         """Embed texts via Ollama API."""
